@@ -1,7 +1,7 @@
 # restaurant-number-6
 # Restaurant-number-6 – система заказа еды по QR-коду
 
-[![Frontend: React](https://img.shields.io/badge/Frontend-React_+_Vite-61DAFB)](https://reactjs.org/)
+[![Frontend: React](https://img.shields.io/badge/Frontend-React)](https://reactjs.org/)
 [![Backend: Node.js](https://img.shields.io/badge/Backend-Node.js_+_Express-339933)](https://nodejs.org/)
 [![Database: PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL-4169E1)](https://www.postgresql.org/)
 
@@ -44,7 +44,7 @@
 - TypeScript
 - Axios/Fetch
 - Socket.io-client
-- 
+
 **Backend:**
 - Node.js + Express.js + TypeScript
 - Prisma ORM
@@ -84,6 +84,6 @@
 
 *(Инструкция по установке)*
 
-##Contributing
+## Contributing
 
 Наша команда открыта к предложениям и улучшениям! Если вы хотите внести свой вклад свяжитесь с нами *контакты*!
