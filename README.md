@@ -8,9 +8,9 @@ REST API платформы цифрового обслуживания рест
 | | |
 |---|---|
 | API | `http://localhost:5000/api/v1` |
-| Swagger UI | `http://localhost:5000/api/docs` (спецификация: [`docs/openapi.yaml`](docs/openapi.yaml)) |
+| Swagger UI | `http://localhost:5000/api/docs` (спецификация: [`docs/openapi.yaml`](backend/docs/openapi.yaml)) |
 | RabbitMQ UI | `http://localhost:15672` (guest / guest) |
-| Документация | [ER-модель](docs/er-diagram.md) · [Архитектура и очереди](docs/architecture.md) · [Демо-сценарий](docs/demo-scenario.md) · [Скриншоты](docs/screenshots/) |
+| Документация | [ER-модель](backend/docs/er-diagram.md) · [Архитектура и очереди](backend/docs/architecture.md) · [Демо-сценарий](backend/docs/demo-scenario.md) · [Скриншоты](backend/docs/screenshots/) |
 
 ---
 
@@ -198,4 +198,4 @@ backend/
 - **Вызов официанта (BE-09…BE-11, раздел 11).** Факт вызова сохраняется в БД до публикации. Сообщение уходит в
   RabbitMQ с publisher confirm, consumer держит его без ack, пока официант не примет вызов. Повторная доставка
   дубля не создаёт. Если брокер недоступен, вызов публикуется после переподключения (outbox). Подробности —
-  в [docs/architecture.md](docs/architecture.md).
+  в [docs/architecture.md](backend/docs/architecture.md).
