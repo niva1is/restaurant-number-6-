@@ -26,7 +26,7 @@
 Нужны **Node.js 20+** и npm.
 
 ```bash
-cd restaurant-app          # или корень вашего frontend-репозитория
+cd restaurant-app          #
 npm install
 npm run dev                # http://localhost:5173
 ```
