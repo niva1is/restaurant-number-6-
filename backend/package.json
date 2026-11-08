@@ -1,0 +1,69 @@
+{
+  "name": "qr-restaurant-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "QR Restaurant — REST API /api/v1 для цифрового обслуживания ресторана: QR-меню, заказы, state machine, RabbitMQ + WebSocket",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:watch": "vitest",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "seed": "prisma db seed"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "keywords": [
+    "restaurant",
+    "qr-menu",
+    "express",
+    "prisma",
+    "rabbitmq",
+    "socket.io"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^6.19.0",
+    "amqplib": "^0.10.4",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1",
+    "swagger-ui-express": "^5.0.1",
+    "yaml": "^2.6.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/supertest": "^6.0.2",
+    "@types/swagger-ui-express": "^4.1.7",
+    "prisma": "^6.19.0",
+    "socket.io-client": "^4.8.1",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

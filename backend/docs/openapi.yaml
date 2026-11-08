@@ -1,0 +1,1057 @@
+openapi: 3.0.3
+info:
+  title: QR Restaurant API
+  version: 1.0.0
+  description: |
+    REST API платформы цифрового обслуживания ресторана: QR-меню, заказы без регистрации,
+    state machine заказа, кухонный терминал, панель официанта, вызов официанта через RabbitMQ.
+
+    **Аутентификация**
+    * Персонал (ADMIN, COOK, WAITER) — `Authorization: Bearer <JWT>` из `POST /auth/login`.
+    * Гость — заголовок `X-Table-Token: <UUID из QR-кода стола>`. Регистрация не нужна.
+
+    **Формат**: JSON (UTF-8), даты — ISO 8601 (UTC), деньги — число с 2 знаками.
+    Ошибки: `{ "error": { "code": "...", "message": "...", "details": ... } }`.
+
+    **Реальное время** (Socket.io, тот же порт):
+    * namespace `/` — персонал, `auth: { token: <JWT> }`; события `ORDER_CREATED`, `ORDER_STATUS_CHANGED`,
+      `NEW_WAITER_CALL`, `WAITER_CALL_RESOLVED`, `STOP_LIST_CHANGED`;
+    * namespace `/guest` — гость, `auth: { tableToken: <UUID> }`; события своего стола
+      `ORDER_STATUS_CHANGED`, `WAITER_CALL_RESOLVED`, а также `STOP_LIST_CHANGED`.
+servers:
+  - url: http://localhost:5000/api/v1
+    description: Локальная разработка
+tags:
+  - name: Auth
+    description: Вход персонала
+  - name: Menu
+    description: Меню, категории, блюда, стоп-лист (BE-01, BE-02)
+  - name: Tables
+    description: Столы и QR-токены (BE-03, BE-04)
+  - name: Orders
+    description: Заказы и state machine (BE-05 … BE-08, BE-11)
+  - name: Notifications
+    description: Вызов официанта через RabbitMQ + WebSocket (BE-09, BE-10)
+  - name: System
+    description: Служебные эндпоинты
+
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      tags: [Auth]
+      summary: Вход сотрудника
+      description: Возвращает JWT с ролью. Не более 20 неудачных попыток за 15 минут с одного IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { username: admin, password: admin123 }
+      responses:
+        '200':
+          description: Успешный вход
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: Неверный логин или пароль
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: INVALID_CREDENTIALS, message: Неверный логин или пароль } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [Auth]
+      summary: Профиль текущего сотрудника
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Профиль
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /menu:
+    get:
+      operationId: getMenu
+      tags: [Menu]
+      summary: Меню с категориями и блюдами
+      description: 'Публичный. Блюда из стоп-листа возвращаются с `isAvailable: false`.'
+      security: []
+      parameters:
+        - name: available
+          in: query
+          description: '`true` — только доступные блюда'
+          schema: { type: string, enum: ['true', 'false'] }
+        - name: restaurantId
+          in: query
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Меню
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MenuCategory' }
+
+  /menu/categories:
+    get:
+      operationId: listCategories
+      tags: [Menu]
+      summary: Список категорий
+      security: []
+      responses:
+        '200':
+          description: Категории
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Category' }
+    post:
+      operationId: createCategory
+      tags: [Menu]
+      summary: Создать категорию (ADMIN)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryInput' }
+            example: { name: Пицца, sortOrder: 1 }
+      responses:
+        '201':
+          description: Создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /menu/categories/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      operationId: updateCategory
+      tags: [Menu]
+      summary: Изменить категорию (ADMIN)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryUpdate' }
+      responses:
+        '200':
+          description: Изменена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteCategory
+      tags: [Menu]
+      summary: Удалить пустую категорию (ADMIN)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Удалена }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: В категории есть блюда (CATEGORY_NOT_EMPTY)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /menu/ingredients:
+    get:
+      operationId: listIngredients
+      tags: [Menu]
+      summary: Справочник ингредиентов
+      security: []
+      responses:
+        '200':
+          description: Ингредиенты
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: integer }
+                    name: { type: string }
+
+  /menu/stop-list:
+    get:
+      operationId: getStopList
+      tags: [Menu]
+      summary: Блюда в стоп-листе (персонал)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Блюда с isAvailable = false
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Dish' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /menu/dishes:
+    post:
+      operationId: createDish
+      tags: [Menu]
+      summary: Создать блюдо (ADMIN)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DishInput' }
+            example:
+              categoryId: 1
+              name: Маргарита
+              description: Томатный соус, моцарелла, базилик
+              price: 590
+              calories: 820
+              ingredients: [Тесто, Томатный соус, Моцарелла, Базилик]
+      responses:
+        '201':
+          description: Создано
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dish' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /menu/dishes/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getDish
+      tags: [Menu]
+      summary: Карточка блюда
+      security: []
+      responses:
+        '200':
+          description: Блюдо
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dish' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateDish
+      tags: [Menu]
+      summary: Изменить блюдо (ADMIN)
+      description: Новая цена действует только для новых заказов — созданные хранят снимок цены (BE-06).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DishUpdate' }
+            example: { price: 650 }
+      responses:
+        '200':
+          description: Изменено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dish' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteDish
+      tags: [Menu]
+      summary: Удалить блюдо (ADMIN)
+      description: История заказов сохраняется благодаря снимкам названия и цены в позициях.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Удалено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /menu/dishes/{id}/stop-list:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      operationId: setDishStopList
+      tags: [Menu]
+      summary: Стоп-лист блюда (ADMIN, COOK)
+      description: Без тела — переключает isAvailable; с `isAvailable` — устанавливает значение.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                isAvailable: { type: boolean }
+            example: { isAvailable: false }
+      responses:
+        '200':
+          description: Блюдо с новым значением isAvailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dish' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tables:
+    get:
+      operationId: listTables
+      tags: [Tables]
+      summary: Список столов с токенами (ADMIN)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Столы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Table' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createTable
+      tags: [Tables]
+      summary: Создать стол (ADMIN)
+      description: Генерируется tableToken — UUID v4 из криптостойкого генератора (BE-03).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string, maxLength: 20 }
+                restaurantId: { type: integer }
+            example: { number: '6' }
+      responses:
+        '201':
+          description: Стол создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Table' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tables/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      operationId: updateTable
+      tags: [Tables]
+      summary: Переименовать стол (ADMIN)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string }
+      responses:
+        '200':
+          description: Изменён
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Table' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteTable
+      tags: [Tables]
+      summary: Удалить стол без заказов (ADMIN)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Удалён }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tables/{id}/regenerate-token:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: regenerateTableToken
+      tags: [Tables]
+      summary: Перевыпустить токен стола (ADMIN)
+      description: Старый QR-код перестаёт работать.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Стол с новым токеном
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Table' }
+
+  /tables/{id}/qr:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getTableQr
+      tags: [Tables]
+      summary: QR-код стола (ADMIN)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, svg, png], default: json }
+      responses:
+        '200':
+          description: QR-код (json — с data URL PNG; svg; png)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tableId: { type: integer }
+                  number: { type: string }
+                  url: { type: string, example: 'http://localhost:5173/table/1b2a731a-e307-48b4-8379-34485e6be9db' }
+                  qrDataUrl: { type: string, example: 'data:image/png;base64,iVBORw0...' }
+            image/svg+xml: {}
+            image/png: {}
+
+  /tables/check/{token}:
+    get:
+      operationId: checkTableToken
+      tags: [Tables]
+      summary: Проверить QR-токен (гость)
+      description: Публичный. Возвращает контекст стола для гостевой сессии (BE-04).
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Токен действителен
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TableSession' }
+        '404':
+          description: Токен не найден (INVALID_TABLE_TOKEN)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /orders/quote:
+    post:
+      operationId: quoteOrder
+      tags: [Orders]
+      summary: Расчёт корзины сервером (гость)
+      description: Проверяет стоп-лист и считает итог по ценам из БД, заказ не создаёт (FE-02).
+      security: [{ tableToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/OrderItemInput' }
+      responses:
+        '200':
+          description: Подтверждённый итог
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderQuote' }
+        '400': { $ref: '#/components/responses/OrderRejected' }
+        '401': { $ref: '#/components/responses/InvalidTableToken' }
+
+  /orders:
+    post:
+      operationId: createOrder
+      tags: [Orders]
+      summary: Создать заказ (гость)
+      description: |
+        Сервер заново проверяет стоп-лист и цены (BE-05), фиксирует снимок цены каждой позиции
+        и создаёт заказ в статусе ACCEPTED (BE-06). Цены из запроса клиента игнорируются.
+        Если передан `expectedTotal` и он не совпал с серверной суммой — 409 PRICE_CHANGED.
+      security: [{ tableToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOrderRequest' }
+            example:
+              items: [{ dishId: 1, quantity: 2 }, { dishId: 10, quantity: 1 }]
+              comment: Без лука
+              expectedTotal: 1400
+      responses:
+        '201':
+          description: Заказ создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '400': { $ref: '#/components/responses/OrderRejected' }
+        '401': { $ref: '#/components/responses/InvalidTableToken' }
+        '409':
+          description: Цены изменились (PRICE_CHANGED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: PRICE_CHANGED
+                  message: Цены в меню изменились — проверьте корзину и подтвердите заказ ещё раз
+                  details: { expectedTotal: 1400, actualTotal: 1480 }
+
+  /orders/my:
+    get:
+      operationId: getMyOrders
+      tags: [Orders]
+      summary: Заказы своего стола (гость)
+      description: Текущие заказы стола и завершённые за последние 30 минут (FE-03).
+      security: [{ tableToken: [] }]
+      responses:
+        '200':
+          description: Заказы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/InvalidTableToken' }
+
+  /orders/active:
+    get:
+      operationId: getActiveOrders
+      tags: [Orders]
+      summary: Активные заказы — кухня и официант (COOK, WAITER, ADMIN)
+      description: 'Очередь: старые заказы первыми. `availableTransitions` — кнопки, доступные роли.'
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          description: Фильтр через запятую, например `READY` или `ACCEPTED,COOKING`
+          schema: { type: string }
+      responses:
+        '200':
+          description: Заказы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /orders/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getOrder
+      tags: [Orders]
+      summary: Заказ с историей статусов (персонал)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Заказ и аудит переходов (BE-11)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderWithHistory' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orders/{id}/status:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      operationId: changeOrderStatus
+      tags: [Orders]
+      summary: Сменить статус заказа (state machine)
+      description: |
+        | Переход | Роль |
+        |---|---|
+        | ACCEPTED → COOKING | COOK |
+        | COOKING → READY | COOK |
+        | READY → SERVED | WAITER |
+        | SERVED → PAID | ADMIN |
+        | ACCEPTED → CANCELLED | COOK, ADMIN |
+        | COOKING / READY / SERVED → CANCELLED | ADMIN |
+
+        Несуществующий переход — 400 INVALID_STATUS_TRANSITION; переход не для этой роли — 403
+        TRANSITION_FORBIDDEN_FOR_ROLE; статус уже изменил другой сотрудник — 409 ORDER_STATUS_CONFLICT.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/OrderStatus' }
+                reason: { type: string, maxLength: 500, description: 'Причина (например, для CANCELLED)' }
+            example: { status: COOKING }
+      responses:
+        '200':
+          description: Статус изменён
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '400':
+          description: Недопустимый переход
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: INVALID_STATUS_TRANSITION
+                  message: 'Недопустимый переход статуса заказа: ACCEPTED → PAID'
+                  details: { from: ACCEPTED, to: PAID, allowedTargets: [COOKING, CANCELLED] }
+        '403':
+          description: Переход запрещён для роли
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: TRANSITION_FORBIDDEN_FOR_ROLE
+                  message: 'Ваша роль не может выполнить этот переход статуса: ACCEPTED → COOKING'
+                  details: { from: ACCEPTED, to: COOKING, role: WAITER, allowedRoles: [COOK] }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /notifications/call-waiter:
+    post:
+      operationId: callWaiter
+      tags: [Notifications]
+      summary: Вызвать официанта (гость)
+      description: |
+        Сохраняет WaiterCall (PENDING) и публикует событие в RabbitMQ (exchange `restaurant.events`,
+        routing key `waiter_call.created`, очередь `waiter_calls`). Consumer доставляет его на панель официанта
+        по WebSocket (`NEW_WAITER_CALL`) — без polling БД.
+
+        Не чаще 1 раза в 30 секунд со стола — иначе 429 и заголовок `Retry-After`.
+        Если у стола уже есть активный вызов, новый не создаётся — возвращается существующий (200, `duplicate: true`).
+      security: [{ tableToken: [] }]
+      responses:
+        '201':
+          description: Вызов создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CallWaiterResponse' }
+        '200':
+          description: Активный вызов уже есть — дубль не создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CallWaiterResponse' }
+        '401': { $ref: '#/components/responses/InvalidTableToken' }
+        '429':
+          description: Слишком частые вызовы (WAITER_CALL_RATE_LIMITED)
+          headers:
+            Retry-After:
+              description: Через сколько секунд можно повторить
+              schema: { type: integer, example: 30 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /notifications/call-waiter/{eventId}/resolve:
+    post:
+      operationId: resolveWaiterCall
+      tags: [Notifications]
+      summary: Принять вызов (WAITER, ADMIN)
+      description: Статус RESOLVED и подтверждение (ack) сообщения в RabbitMQ. Идемпотентно.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 'Вызов закрыт (`alreadyResolved: true` при повторном запросе)'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alreadyResolved: { type: boolean }
+                  call: { $ref: '#/components/schemas/WaiterCall' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /notifications/calls/active:
+    get:
+      operationId: getActiveWaiterCalls
+      tags: [Notifications]
+      summary: Активные вызовы (WAITER, ADMIN)
+      description: Восстановление панели официанта из серверного состояния после переподключения (NFR-09).
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Вызовы со статусом PENDING
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WaiterCall' }
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: [System]
+      summary: Состояние сервиса
+      security: []
+      responses:
+        '200':
+          description: Сервис работает
+          content:
+            application/json:
+              example: { status: ok, timestamp: '2026-10-07T12:00:00.000Z', services: { database: up, broker: up } }
+        '503':
+          description: База данных недоступна
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT сотрудника из POST /auth/login
+    tableToken:
+      type: apiKey
+      in: header
+      name: X-Table-Token
+      description: UUID стола из QR-кода
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации (VALIDATION_ERROR)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Ошибка валидации входных данных
+              details: [{ field: price, message: Цена должна быть больше 0 }]
+    Unauthorized:
+      description: Нет или неверный JWT
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Недостаточно прав (FORBIDDEN)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Конфликт данных
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Слишком много запросов
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidTableToken:
+      description: Нет или неверный X-Table-Token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: INVALID_TABLE_TOKEN, message: QR-код стола недействителен } }
+    OrderRejected:
+      description: Заказ отклонён — блюдо в стоп-листе или не найдено, некорректная корзина
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: DISH_IN_STOP_LIST
+              message: 'Блюдо временно недоступно (стоп-лист): Тирамису'
+              details: { dishes: [{ id: 9, name: Тирамису }] }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details: {}
+
+    UserRole:
+      type: string
+      enum: [ADMIN, COOK, WAITER]
+
+    OrderStatus:
+      type: string
+      enum: [ACCEPTED, COOKING, READY, SERVED, PAID, CANCELLED]
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+
+    StaffUser:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { $ref: '#/components/schemas/UserRole' }
+
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string, description: JWT }
+        role: { $ref: '#/components/schemas/UserRole' }
+        user: { $ref: '#/components/schemas/StaffUser' }
+
+    Category:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        sortOrder: { type: integer }
+        restaurantId: { type: integer }
+
+    CategoryInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100 }
+        sortOrder: { type: integer, minimum: 0 }
+        restaurantId: { type: integer }
+
+    CategoryUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        sortOrder: { type: integer }
+
+    Dish:
+      type: object
+      properties:
+        id: { type: integer }
+        categoryId: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { type: number, example: 590 }
+        calories: { type: integer, nullable: true, description: ккал }
+        imageUrl: { type: string, nullable: true }
+        isAvailable: { type: boolean, description: false — блюдо в стоп-листе }
+        ingredients:
+          type: array
+          items: { type: string }
+        updatedAt: { type: string, format: date-time }
+
+    DishInput:
+      type: object
+      required: [categoryId, name, price]
+      properties:
+        categoryId: { type: integer }
+        name: { type: string, maxLength: 150 }
+        description: { type: string, nullable: true }
+        price: { type: number, minimum: 0.01, multipleOf: 0.01 }
+        calories: { type: integer, minimum: 0, nullable: true }
+        imageUrl: { type: string, format: uri, nullable: true }
+        ingredients:
+          type: array
+          maxItems: 50
+          items: { type: string }
+        isAvailable: { type: boolean }
+
+    DishUpdate:
+      allOf:
+        - $ref: '#/components/schemas/DishInput'
+      description: Любое подмножество полей DishInput (хотя бы одно)
+
+    MenuCategory:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        sortOrder: { type: integer }
+        dishes:
+          type: array
+          items: { $ref: '#/components/schemas/Dish' }
+
+    Table:
+      type: object
+      properties:
+        id: { type: integer }
+        number: { type: string }
+        restaurantId: { type: integer }
+        tableToken: { type: string, format: uuid }
+        qrUrl: { type: string, example: 'http://localhost:5173/table/1b2a731a-e307-48b4-8379-34485e6be9db' }
+        createdAt: { type: string, format: date-time }
+
+    TableSession:
+      type: object
+      properties:
+        valid: { type: boolean }
+        table:
+          type: object
+          properties:
+            id: { type: integer }
+            number: { type: string }
+        restaurant:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+
+    OrderItemInput:
+      type: object
+      required: [dishId, quantity]
+      properties:
+        dishId: { type: integer }
+        quantity: { type: integer, minimum: 1, maximum: 50 }
+
+    CreateOrderRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: '#/components/schemas/OrderItemInput' }
+        comment: { type: string, maxLength: 500 }
+        expectedTotal: { type: number, description: 'Сумма, которую видел гость' }
+
+    OrderQuote:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              dishId: { type: integer }
+              dishName: { type: string }
+              quantity: { type: integer }
+              price: { type: number }
+              lineTotal: { type: number }
+        totalAmount: { type: number }
+
+    OrderItem:
+      type: object
+      properties:
+        id: { type: integer }
+        dishId: { type: integer, nullable: true, description: null — блюдо удалено из меню }
+        dishName: { type: string, description: Снимок названия }
+        quantity: { type: integer }
+        orderedPrice: { type: number, description: Снимок цены на момент заказа }
+        lineTotal: { type: number }
+
+    Order:
+      type: object
+      properties:
+        id: { type: integer }
+        tableId: { type: integer }
+        tableNumber: { type: string }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        totalAmount: { type: number }
+        comment: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        waitingSeconds: { type: integer, description: Секунд с момента заказа }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+        availableTransitions:
+          type: array
+          description: Только для персонала — статусы, доступные роли
+          items: { $ref: '#/components/schemas/OrderStatus' }
+
+    OrderWithHistory:
+      allOf:
+        - $ref: '#/components/schemas/Order'
+        - type: object
+          properties:
+            history:
+              type: array
+              items:
+                type: object
+                properties:
+                  fromStatus: { allOf: [{ $ref: '#/components/schemas/OrderStatus' }], nullable: true }
+                  toStatus: { $ref: '#/components/schemas/OrderStatus' }
+                  actor: { type: string, enum: [GUEST, ADMIN, COOK, WAITER] }
+                  user:
+                    type: object
+                    nullable: true
+                    properties:
+                      id: { type: integer }
+                      username: { type: string }
+                  reason: { type: string, nullable: true }
+                  timestamp: { type: string, format: date-time }
+
+    WaiterCall:
+      type: object
+      properties:
+        eventId: { type: string, format: uuid }
+        type: { type: string, enum: [WAITER_CALL] }
+        tableId: { type: integer }
+        tableNumber: { type: string }
+        status: { type: string, enum: [PENDING, RESOLVED] }
+        createdAt: { type: string, format: date-time }
+        publishedAt: { type: string, format: date-time, nullable: true, description: Подтверждение публикации брокером }
+        resolvedAt: { type: string, format: date-time, nullable: true }
+        resolvedBy:
+          type: object
+          nullable: true
+          properties:
+            id: { type: integer }
+            username: { type: string }
+
+    CallWaiterResponse:
+      type: object
+      properties:
+        duplicate: { type: boolean, description: true — у стола уже был активный вызов }
+        delivery:
+          type: string
+          enum: [broker, fallback]
+          description: broker — опубликован в RabbitMQ; fallback — брокер недоступен, доставлено напрямую по WebSocket
+        call: { $ref: '#/components/schemas/WaiterCall' }
+
+    WaiterCallMessage:
+      description: Сообщение в очереди RabbitMQ `waiter_calls`
+      type: object
+      required: [event_id, type, table_id, table_number, timestamp]
+      properties:
+        event_id: { type: string, format: uuid }
+        type: { type: string, enum: [WAITER_CALL] }
+        table_id: { type: integer }
+        table_number: { type: string }
+        timestamp: { type: string, format: date-time }
+
+security:
+  - bearerAuth: []

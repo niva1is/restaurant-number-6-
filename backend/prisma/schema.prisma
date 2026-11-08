@@ -1,0 +1,226 @@
+// Схема БД платформы QR-ресторана.
+// Таблицы создаются только через Prisma Migrate (prisma/migrations хранится в репозитории).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Перечисления ────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  COOK
+  WAITER
+}
+
+/// ACCEPTED → COOKING → READY → SERVED → PAID; CANCELLED — аномальное завершение.
+enum OrderStatus {
+  ACCEPTED
+  COOKING
+  READY
+  SERVED
+  PAID
+  CANCELLED
+}
+
+/// Кто инициировал событие аудита (BE-11). Гость не имеет учётной записи.
+enum EventActor {
+  GUEST
+  ADMIN
+  COOK
+  WAITER
+}
+
+enum WaiterCallStatus {
+  PENDING
+  RESOLVED
+}
+
+// ─── Персонал ────────────────────────────────────────────────────────────────
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  role         UserRole
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  statusEvents  OrderStatusEvent[]
+  resolvedCalls WaiterCall[]
+
+  @@map("users")
+}
+
+// ─── Ресторан, столы, меню ───────────────────────────────────────────────────
+
+model Restaurant {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  address   String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tables     Table[]
+  categories Category[]
+
+  @@map("restaurants")
+}
+
+model Table {
+  id           Int      @id @default(autoincrement())
+  restaurantId Int      @map("restaurant_id")
+  number       String
+  /// UUID v4 из QR-кода (BE-03). Непредсказуем, может быть перевыпущен администратором.
+  tableToken   String   @unique @default(uuid()) @map("table_token") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  restaurant  Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  orders      Order[]
+  waiterCalls WaiterCall[]
+
+  @@unique([restaurantId, number])
+  @@map("tables")
+}
+
+model Category {
+  id           Int    @id @default(autoincrement())
+  restaurantId Int    @map("restaurant_id")
+  name         String
+  sortOrder    Int    @default(0) @map("sort_order")
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  dishes     Dish[]
+
+  @@unique([restaurantId, name])
+  @@map("categories")
+}
+
+model Dish {
+  id          Int      @id @default(autoincrement())
+  categoryId  Int      @map("category_id")
+  name        String
+  description String?
+  price       Decimal  @db.Decimal(10, 2)
+  calories    Int?
+  imageUrl    String?  @map("image_url")
+  /// false — блюдо в стоп-листе (BE-02).
+  isAvailable Boolean  @default(true) @map("is_available")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  category    Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  ingredients DishIngredient[]
+  orderItems  OrderItem[]
+
+  @@index([categoryId])
+  @@map("dishes")
+}
+
+model Ingredient {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  dishes DishIngredient[]
+
+  @@map("ingredients")
+}
+
+/// Связь многие-ко-многим «блюдо — ингредиент».
+model DishIngredient {
+  dishId       Int @map("dish_id")
+  ingredientId Int @map("ingredient_id")
+
+  dish       Dish       @relation(fields: [dishId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@id([dishId, ingredientId])
+  @@index([ingredientId])
+  @@map("dish_ingredients")
+}
+
+// ─── Заказы ──────────────────────────────────────────────────────────────────
+
+model Order {
+  id          Int         @id @default(autoincrement())
+  tableId     Int         @map("table_id")
+  status      OrderStatus @default(ACCEPTED)
+  /// Сумма по снимку цен позиций; не пересчитывается при изменении меню (BE-06).
+  totalAmount Decimal     @map("total_amount") @db.Decimal(10, 2)
+  comment     String?
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  table        Table              @relation(fields: [tableId], references: [id], onDelete: Restrict)
+  items        OrderItem[]
+  statusEvents OrderStatusEvent[]
+
+  @@index([status, createdAt])
+  @@index([tableId, createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id           Int     @id @default(autoincrement())
+  orderId      Int     @map("order_id")
+  /// null, если блюдо позже удалили из меню: счёт сохраняется за счёт снимков ниже.
+  dishId       Int?    @map("dish_id")
+  /// Снимок названия на момент заказа.
+  dishName     String  @map("dish_name")
+  quantity     Int
+  /// Снимок цены на момент заказа (BE-06).
+  orderedPrice Decimal @map("ordered_price") @db.Decimal(10, 2)
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  dish  Dish? @relation(fields: [dishId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([dishId])
+  @@map("order_items")
+}
+
+/// Аудит переходов статусов (BE-11): время и инициатор каждого перехода.
+model OrderStatusEvent {
+  id         Int          @id @default(autoincrement())
+  orderId    Int          @map("order_id")
+  /// null для события создания заказа.
+  fromStatus OrderStatus? @map("from_status")
+  toStatus   OrderStatus  @map("to_status")
+  actor      EventActor
+  userId     Int?         @map("user_id")
+  reason     String?
+  timestamp  DateTime     @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([orderId, timestamp])
+  @@map("order_status_events")
+}
+
+// ─── Вызов официанта ─────────────────────────────────────────────────────────
+
+model WaiterCall {
+  /// Совпадает с event_id сообщения в RabbitMQ.
+  id            String           @id @default(uuid()) @db.Uuid
+  tableId       Int              @map("table_id")
+  status        WaiterCallStatus @default(PENDING)
+  /// = tableId, пока вызов PENDING; null после RESOLVED.
+  /// Уникальность гарантирует не более одного активного вызова на стол даже при гонке запросов.
+  activeTableId Int?             @unique @map("active_table_id")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  /// Момент подтверждения публикации брокером (publisher confirm). null — ещё не опубликован.
+  publishedAt   DateTime?        @map("published_at")
+  resolvedAt    DateTime?        @map("resolved_at")
+  resolvedById  Int?             @map("resolved_by_id")
+
+  table      Table @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  resolvedBy User? @relation(fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([tableId, createdAt])
+  @@index([status, createdAt])
+  @@map("waiter_calls")
+}

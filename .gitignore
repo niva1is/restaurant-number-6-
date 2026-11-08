@@ -1,0 +1,26 @@
+# Зависимости
+node_modules/
+front/node_modules/
+backend/node_modules/
+
+# Сборка
+dist/
+front/dist/
+
+# Переменные окружения
+.env
+front/.env
+backend/.env
+
+# Файлы Docker
+*.log
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Папки с данными
+postgres_data/
+rabbitmq_data/
